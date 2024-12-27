@@ -176,6 +176,161 @@ def extract_specific_metadata(image_paths):
 
     return metadata_list
 
+def estimate_overall_lux(metadata_list):
+    """
+    Given a list of metadata dictionaries, each containing:
+      - "lux_adjusted"
+      - "lux_unadjusted"
+      - "mean_pixel_value"
+    this function computes 8 different estimates of the overall lux:
+    
+    1) median_adjusted
+    2) mean_adjusted
+    3) weighted_median_adjusted  (weights derived from distance to mean_pixel_value=128)
+    4) weighted_mean_adjusted    (weights derived from distance to mean_pixel_value=128)
+    
+    5) median_unadjusted
+    6) mean_unadjusted
+    7) weighted_median_unadjusted
+    8) weighted_mean_unadjusted
+    
+    The weighting scheme for #3, #4, #7, #8 is:
+       dist_from_128 = min(abs(128 - mean_pixel_value), 50)
+       weight = (80 - dist_from_128)
+    So weights range from 30 to 80.
+    
+    Returns a dict with all 8 values.
+    """
+    # --- Helper Functions ---
+    
+    def simple_median(values):
+        """Return the median of a list of floats."""
+        arr = np.array(values, dtype=np.float32)
+        return float(np.median(arr))
+    
+    def simple_mean(values):
+        """Return the mean of a list of floats."""
+        arr = np.array(values, dtype=np.float32)
+        return float(np.mean(arr))
+    
+    def weighted_mean(values, weights):
+        """
+        Weighted mean = sum(value_i * weight_i) / sum(weight_i).
+        Both 'values' and 'weights' are lists of the same length.
+        """
+        values = np.array(values, dtype=np.float32)
+        weights = np.array(weights, dtype=np.float32)
+        total_weight = np.sum(weights)
+        if total_weight == 0:
+            return 0.0
+        return float(np.sum(values * weights) / total_weight)
+    
+    def weighted_median(values, weights):
+        """
+        Computes the weighted median of 'values' with corresponding 'weights'.
+        Weighted median m is such that sum(weights_i for values_i <= m) >= total_weight/2
+        and sum(weights_i for values_i >= m) >= total_weight/2.
+        """
+        # Sort by value
+        sorted_pairs = sorted(zip(values, weights), key=lambda x: x[0])
+        cumulative_weight = 0.0
+        total_weight = sum(weights)
+        half_weight = total_weight / 2.0
+        
+        for val, w in sorted_pairs:
+            cumulative_weight += w
+            if cumulative_weight >= half_weight:
+                return val
+        # Fallback if something goes off (shouldn't happen)
+        return sorted_pairs[-1][0] if sorted_pairs else 0.0
+    
+    # --- Extract the needed fields from metadata_list ---
+    lux_adjusted_vals = []
+    lux_unadjusted_vals = []
+    pixel_vals = []  # mean_pixel_value
+    
+    for meta in metadata_list:
+        lux_adj = meta.get("lux_adjusted")
+        lux_unadj = meta.get("lux_unadjusted")
+        mpv = meta.get("mean_pixel_value")
+        
+        if (lux_adj is not None) and (lux_unadj is not None) and (mpv is not None):
+            lux_adjusted_vals.append(lux_adj)
+            lux_unadjusted_vals.append(lux_unadj)
+            pixel_vals.append(mpv)
+        else:
+            # If any crucial field is missing, skip that photo for this analysis
+            pass
+    
+    # If no valid data, return zeros
+    if not lux_adjusted_vals:
+        return {
+            "median_adjusted": 0,
+            "mean_adjusted": 0,
+            "weighted_median_adjusted": 0,
+            "weighted_mean_adjusted": 0,
+            "median_unadjusted": 0,
+            "mean_unadjusted": 0,
+            "weighted_median_unadjusted": 0,
+            "weighted_mean_unadjusted": 0
+        }
+    
+    # --- 1) median_adjusted ---
+    median_adjusted = simple_median(lux_adjusted_vals)
+    
+    # --- 2) mean_adjusted ---
+    mean_adjusted = simple_mean(lux_adjusted_vals)
+    
+    # --- Weighted approach (3) & (4) for adjusted ---
+    # We'll compute the weights based on distance from 128
+    # dist_from_128 = min(abs(128 - mpv), 50)
+    # weight = (80 - dist_from_128)
+    
+    adjusted_weights = []
+    for mpv in pixel_vals:
+        dist_from_128 = min(abs(128.0 - mpv), 50.0)
+        weight = 70.0 - dist_from_128
+        adjusted_weights.append(weight)
+    
+    # 3) Weighted "median" of lux_adjusted
+    weighted_median_adjusted = weighted_median(lux_adjusted_vals, adjusted_weights)
+    
+    # 4) Weighted mean of lux_adjusted
+    weighted_mean_adjusted = weighted_mean(lux_adjusted_vals, adjusted_weights)
+    
+    # --- Repeat for unadjusted ---
+    # 5) median_unadjusted
+    median_unadjusted = simple_median(lux_unadjusted_vals)
+    
+    # 6) mean_unadjusted
+    mean_unadjusted = simple_mean(lux_unadjusted_vals)
+    
+    # 7) Weighted median unadjusted
+    unadjusted_weights = []
+    for i, mpv in enumerate(pixel_vals):
+        dist_from_128 = min(abs(128.0 - mpv), 50.0)
+        weight = 80.0 - dist_from_128
+        unadjusted_weights.append(weight)
+    
+    weighted_median_unadjusted = weighted_median(lux_unadjusted_vals, unadjusted_weights)
+    
+    # 8) Weighted mean unadjusted
+    weighted_mean_unadjusted = weighted_mean(lux_unadjusted_vals, unadjusted_weights)
+    
+    # Return all results in a dictionary
+    return {
+        "median_adjusted": median_adjusted,
+        "mean_adjusted": mean_adjusted,
+        "weighted_median_adjusted": weighted_median_adjusted,
+        "weighted_mean_adjusted": weighted_mean_adjusted,
+        
+        "median_unadjusted": median_unadjusted,
+        "mean_unadjusted": mean_unadjusted,
+        "weighted_median_unadjusted": weighted_median_unadjusted,
+        "weighted_mean_unadjusted": weighted_mean_unadjusted
+    }
+    
+
 register_heif_opener()
 
 def load_image_as_opencv(filename):
